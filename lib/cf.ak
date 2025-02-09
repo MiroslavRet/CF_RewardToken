@@ -10,7 +10,7 @@ use cardano/transaction.{
 use config
 use crowdfunding/types.{
   BackerDatum, CampaignAction, CampaignDatum, Cancel, Cancelled, Finish,
-  Finished, Refund, Running,  InitCampaign, SupportCampaign, FinishCampaign, CollectToCreator,
+  Finished, Refund, Running, RewardNftAction, InitCampaign, SupportCampaign, FinishCampaign, CollectToCreator,
 }
 use crowdfunding/utils
 use test_kit/time/unwrap
@@ -23,7 +23,7 @@ pub fn validate_mint_campaign(
   nonce: OutputReference,
   campaign_datum: CampaignDatum,
   backer_datum: BackerDatum,
-  redeemer: CampaignAction,       
+  redeemer: RewardNftAction,       
   self_script: PolicyId,
   tx: Transaction,
 ) -> Bool {
