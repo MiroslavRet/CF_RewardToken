@@ -312,6 +312,13 @@ pub fn validate_support_campaign(
   }
 }
 
+
+
+fn must_mint_support_token2(tx: Transaction, self_script: PolicyId) -> Bool {
+  let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
+  minted_qty == 1
+}
+
 fn must_mint_support_token(tx: Transaction, self_script: PolicyId) -> Bool {
   let self_address = Address(Script(self_script), None)
 
@@ -326,6 +333,7 @@ fn must_mint_support_token(tx: Transaction, self_script: PolicyId) -> Bool {
   let input_lovelace = list.reduce(tx.inputs, 0, sum_input)
   let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
 
+  // Ensure minted quantity matches the input Lovelace divided by 1,000,000
   minted_qty == (input_lovelace / 1_000_000)
 }
 
@@ -342,6 +350,9 @@ pub fn validate_support_campaign(
     must_send_support_token(tx, self_script, with_backer_datum)?,
   }
 } 
+
+
+
 
 fn must_send_support_token2(
   tx: Transaction,
@@ -371,6 +382,7 @@ fn must_send_support_token(
   let with_backer_datum_data: Data = with_backer_datum
   let self_address = address.from_script(self_script)
 
+  // Calculate the minted quantity of support tokens
   let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
 
   // Sum all outputs matching the script address and backer datum
@@ -394,6 +406,7 @@ fn must_send_support_token(
     }
   )
 
+  // Validate that the total sent support tokens equal the minted quantity
   sum_output == minted_qty
 }
 
@@ -453,12 +466,10 @@ fn finish_campaign(
     if is_signed_by_platform? {
         must_be_after_deadline(tx, campaign_datum.deadline)?
       } else {
-        // Otherwise, ensure the transaction is signed by the creator
         must_be_signed_by(tx, campaign_datum.creator.1st)?
       },
 
       is_running_campaign(tx.inputs, self_script)?,
-      // Move STATE_TOKEN to the same script address with `state = Finished`
       must_send_state_token(
         tx,
         self_script,
@@ -475,7 +486,6 @@ fn finish_campaign(
       must_distribute_to_creator(tx, self_script, campaign_datum.creator)?,
       
     } else if current_datum is BackerDatum {
-    // If the inline datum is BackerDatum, we only check the campaign is still running
     is_running_campaign(tx.inputs, self_script)?
   } else {
     fail @"Invalid Finish Datum Type!"
@@ -490,7 +500,6 @@ fn must_mint_reward_burn_support(
 ) -> Bool {
   let backer_datum_data: Data = backer_datum
 
-  // 1️⃣ Collect Input Support Tokens (Spent from Script Address)
   let self_address = Address(Script(self_script), None)
   let input_support_token = list.reduce(
     tx.inputs,
@@ -512,16 +521,13 @@ fn must_mint_reward_burn_support(
     }
   )
 
-  // 2️⃣ Check Minting and Burning in tx.mint
   let minted_and_burned_tokens = tx.mint |> assets.tokens(self_script) |> dict.to_pairs()
 
-  // Ensure both mint and burn operations are present:
   let mint_and_burn_valid = minted_and_burned_tokens == [
     Pair(config.reward_token, input_support_token),    // Mint Reward Tokens
     Pair(config.support_token, -input_support_token)   // Burn Support Tokens
   ]
 
-  // 3️⃣ Ensure Minted Reward Tokens Are Sent to the Backer
   let backer_address = utils.address_from_tuple(backer_datum)
   let sum_output =
     fn(sum, Output { address, value, .. }) {
@@ -533,10 +539,8 @@ fn must_mint_reward_burn_support(
     }
   let output_reward_token = list.reduce(tx.outputs, 0, sum_output)
 
-  // Check if the backer received at least as many reward tokens as were minted
   let reward_sent_valid = output_reward_token >= input_support_token
 
-  // ✅ Final Combined Check
   (mint_and_burn_valid && reward_sent_valid)?
 }
 
