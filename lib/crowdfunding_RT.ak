@@ -312,32 +312,36 @@ pub fn validate_support_campaign(
   }
 }
 
-
-
-fn must_mint_support_token2(tx: Transaction, self_script: PolicyId) -> Bool {
-  let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
-  minted_qty == 1
-}
-
 fn must_mint_support_token(tx: Transaction, self_script: PolicyId) -> Bool {
-    let self_address = Address(Script(self_script), None)
-  let sum_input =
-    fn(sum, Input { output: Output { address, value, .. }, .. }) {
-      if address == self_address {
-        assets.lovelace_of(value) + sum
-      } else {
-        sum
-      }
-    }
-  let input_lovelace = list.reduce(tx.inputs, 0, sum_input)
+  let self_address = Address(Script(self_script), None)
 
+  let sum_input = fn(sum, Input { output: Output { address, value, .. }, .. }) {
+    if address == self_address {
+      assets.lovelace_of(value) + sum
+    } else {
+      sum
+    }
+  }
+
+  let input_lovelace = list.reduce(tx.inputs, 0, sum_input)
   let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
-  minted_qty == input_lovelace
+
+  minted_qty == (input_lovelace / 1_000_000)
 }
 
+pub fn validate_support_campaign(
+  tx: Transaction,
+  self_script: PolicyId,
+  with_backer_datum: BackerDatum,
+) -> Bool {
+  and {
+    is_running_campaign(tx.inputs, self_script)?,
 
+    must_mint_support_token(tx, self_script)?,
 
-
+    must_send_support_token(tx, self_script, with_backer_datum)?,
+  }
+} 
 
 fn must_send_support_token2(
   tx: Transaction,
@@ -367,7 +371,6 @@ fn must_send_support_token(
   let with_backer_datum_data: Data = with_backer_datum
   let self_address = address.from_script(self_script)
 
-  // Calculate the minted quantity of support tokens
   let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
 
   // Sum all outputs matching the script address and backer datum
@@ -391,7 +394,6 @@ fn must_send_support_token(
     }
   )
 
-  // Validate that the total sent support tokens equal the minted quantity
   sum_output == minted_qty
 }
 
