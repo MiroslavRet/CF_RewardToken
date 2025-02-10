@@ -2,7 +2,10 @@ use aiken/crypto.{VerificationKeyHash}
 use cardano/assets.{PolicyId}
 use cardano/transaction.{OutputReference, Transaction}
 use crowdfunding
-use crowdfunding/types.{CampaignAction, CampaignDatum, RewardNftAction}
+use crowdfunding/types.{CampaignAction, RewardNftAction, BackerDatum, CampaignDatum}
+
+
+
 
 validator campaign(
   platform: VerificationKeyHash,
@@ -10,7 +13,8 @@ validator campaign(
   nonce: OutputReference,
 ) {
   mint(
-    redeemer campaign_datum: RewardNftAction,
+    datum: Option<Data>,
+    redeemer campaign_action: RewardNftAction,
     policy_id self_script: PolicyId,
     tx: Transaction,
   ) {
@@ -18,7 +22,8 @@ validator campaign(
       platform,
       creator,
       nonce,
-      campaign_datum,
+      datum,
+      campaign_action,
       self_script,
       tx,
     )
@@ -45,3 +50,5 @@ validator campaign(
     fail
   }
 }
+
+
