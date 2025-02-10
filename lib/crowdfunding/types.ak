@@ -33,6 +33,7 @@ pub type CampaignAction {
   Finish
   Refund
   CollectToCreator
+  
 }
 
     /// Create a new redeemer type to support multiple actions,
@@ -42,12 +43,9 @@ pub type CampaignAction {
     /// - `FinishCampaign` (to burn support tokens and mint prize/reward tokens)
 
 pub type RewardNftAction {
-  create: InitCampaign
-  support: SupportCampaign
-  finnish: FinishCampaign
-  name: ByteArray,
-  goal: Lovelace,
-  deadline: Int,
-  creator: (PaymentKeyHash, StakeKeyHash),
-  state: CampaignState,
+  InitCampaign(CampaignDatum)
+  SupportCampaign
+  FinishCampaign
 }
+
+
