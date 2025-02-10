@@ -78,6 +78,14 @@ pub fn validate_spend_campaign(
         fail @"Invalid Refund Datum Type! Must be BackerDatum"
       }
 
+// Finish campaign:
+    (Some(current_datum), FinishCampaign) ->
+      if current_datum is campaign_datum: CampaignDatum {
+        tx |> validate_finish_campaign(self_script, campaign_datum, backer_datum, platform)
+      } else {
+        fail @"Invalid Finish Datum Type! Must be CampaignDatum"
+      }
+
       // Collect To Creator:
     (Some(current_datum), CollectToCreator) ->
       if current_datum is campaign_datum: CampaignDatum {
@@ -594,3 +602,48 @@ fn must_distribute_to_creator(
 
 
 
+fn validate_finish_campaign(
+  tx: Transaction,
+  self_script: PolicyId,
+  current_datum: Data,
+  platform: VerificationKeyHash,
+) -> Bool {
+  if current_datum is campaign_datum: CampaignDatum {
+    // The platform can only finish after the deadline;
+    // the creator can finish earlier if the goal is reached
+    let is_signed_by_platform = tx |> must_be_signed_by(platform)
+
+    and {
+      // If platform is signing, ensure we passed the deadline
+      if is_signed_by_platform? {
+        must_be_after_deadline(tx, campaign_datum.deadline)?
+      } else {
+        // Otherwise, ensure the transaction is signed by the creator
+        must_be_signed_by(tx, campaign_datum.creator.1st)?
+      },
+
+      // The campaign state token UTxO must still be in the Running state
+      is_running_campaign(tx.inputs, self_script)?,
+
+      // Move STATE_TOKEN to the same script address with `state = Finished`
+      must_send_state_token(
+        tx,
+        self_script,
+        with_datum: CampaignDatum { ..campaign_datum, state: Finished },
+      )?,
+
+      // Must confirm total backer supports >= goal
+      must_reach_goal(
+        tx,
+        self_script,
+        campaign_datum.goal,
+        campaign_datum.creator,
+      )?,
+    }
+  } else if current_datum is BackerDatum {
+    // If the inline datum is BackerDatum, we only check the campaign is still running
+    is_running_campaign(tx.inputs, self_script)?
+  } else {
+    fail @"Invalid Finish Datum Type!"
+  }
+}
