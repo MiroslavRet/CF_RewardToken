@@ -31,7 +31,7 @@ pub fn validate_mint_campaign(
   expect Script(self_script) = address.payment_credential
 
   when (datum, mint_action) is {
-    // Cancel campaign:
+    // Create campaign:
     (Some(current_datum), InitCampaign) ->
       if current_datum is campaign_datum: CampaignDatum {
         tx
@@ -40,7 +40,7 @@ pub fn validate_mint_campaign(
         fail @"Invalid InitCampaign Datum Type! Must be CampaignDatum"
       }
 
-    // Finish campaign:
+    // Support campaign:
     (Some(current_datum), SupportCampaign) ->
       if current_datum is backer_datum: BackerDatum {
         tx
@@ -344,7 +344,6 @@ pub fn validate_support_campaign(
     is_running_campaign(tx.inputs, self_script)?,
 
     must_mint_support_token(tx, self_script)?,
-    must_send_support_token(tx, self_script, with_backer_datum)?,
   }
 }
 
@@ -410,41 +409,7 @@ fn must_send_support_token2(
   }
 }
 
-fn must_send_support_token( 
-  tx: Transaction,
-  self_script: PolicyId,
-  with_backer_datum: BackerDatum,
-) -> Bool {
-  let with_backer_datum_data: Data = with_backer_datum
-  let self_address = address.from_script(self_script)
 
-  // Calculate the minted quantity of support tokens
-  let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
-
-  // Sum all outputs matching the script address and backer datum
-  let sum_output = list.reduce(
-    tx.outputs,
-    0,
-    fn (sum, Output { address, datum, value, .. }) {
-      if address == self_address {
-        when datum is {
-          InlineDatum(output_datum) ->
-            if output_datum == with_backer_datum_data {
-              sum + assets.quantity_of(value, self_script, config.support_token)
-            } else {
-              sum
-            }
-          _ -> sum
-        }
-      } else {
-        sum
-      }
-    }
-  )
-
-  // Validate that the total sent support tokens equal the minted quantity
-  sum_output == minted_qty
-}
 
 fn must_mint_support_token(tx: Transaction, self_script: PolicyId) -> Bool {
   let self_address = Address(Script(self_script), None)
