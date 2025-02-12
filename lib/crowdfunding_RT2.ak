@@ -15,8 +15,7 @@ use crowdfunding/types.{
 use crowdfunding/utils
 use test_kit/time/unwrap
 
-/// Validates the following action:
-/// - Create campaign
+
 pub fn validate_mint_campaign(
   platform: VerificationKeyHash,
   creator: VerificationKeyHash,
@@ -24,6 +23,7 @@ pub fn validate_mint_campaign(
   datum: Option<Data>,
   mint_action: RewardNftAction,
   self_script: PolicyId,
+  o_ref: OutputReference,
   tx: Transaction,
 ) -> Bool {
   expect Some(Input { output: Output { address, .. }, .. }) =
@@ -44,7 +44,7 @@ pub fn validate_mint_campaign(
     (Some(current_datum), SupportCampaign) ->
       if current_datum is backer_datum: BackerDatum {
         tx
-          |> validate_support_campaign(self_script, campaign_datum, nonce, creator)
+          |> validate_support_campaign(self_script, backer_datum)
       } else {
         fail @"Invalid SupportCampaign Datum Type! Must be BackerDatum"
       }
@@ -69,11 +69,7 @@ pub fn validate_mint_campaign(
   }
 }
 
-/// Validates the following actions:
-/// - Cancel campaign
-/// - Finish campaign
-/// - Refund campaign
-/// - When there is no datum
+
 pub fn validate_spend_campaign(
   platform: VerificationKeyHash,
   creator _creator: VerificationKeyHash,
@@ -130,7 +126,6 @@ pub fn validate_spend_campaign(
   }
 }
 
-// ## Validation Functions
 
 fn validate_create_campaign(
   tx: Transaction,
@@ -237,8 +232,6 @@ fn must_reach_goal(
   }
   let supports = tx.inputs |> list.reduce(0, sum_support)
 
-  // 2. Check that total support is >= goal
-  //    The `?` operator short-circuits if false, otherwise returns `True`.
   (supports >= goal)?
 }
 
@@ -308,7 +301,6 @@ fn must_send_state_token(
   }
 }
 
-// ### Campaign Creation: "STATE_TOKEN" NFT Minting
 
 fn must_mint_state_token(tx: Transaction, self_script: PolicyId) -> Bool {
   let minted_tokens = tx.mint |> assets.tokens(self_script) |> dict.to_pairs()
@@ -343,18 +335,18 @@ pub fn validate_support_campaign(
   and {
     is_running_campaign(tx.inputs, self_script)?,
 
-    must_mint_support_token(tx, self_script)?,
+   must_mint_support_token_NFT(tx, self_script)?,
   }
 }
 
 
 
-fn must_mint_support_token2(tx: Transaction, self_script: PolicyId) -> Bool {
+fn must_mint_support_token_NFT(tx: Transaction, self_script: PolicyId) -> Bool {
   let minted_qty = assets.quantity_of(tx.mint, self_script, config.support_token)
   minted_qty == 1
 }
 
-fn must_mint_support_token(tx: Transaction, self_script: PolicyId) -> Bool {
+fn must_mint_support_token_multiple(tx: Transaction, self_script: PolicyId) -> Bool {
   let self_address = Address(Script(self_script), None)
 
   let sum_input = fn(sum, Input { output: Output { address, value, .. }, .. }) {
@@ -372,19 +364,7 @@ fn must_mint_support_token(tx: Transaction, self_script: PolicyId) -> Bool {
   minted_qty == (input_lovelace / 1_000_000)
 }
 
-pub fn validate_support_campaign(
-  tx: Transaction,
-  self_script: PolicyId,
-  with_backer_datum: BackerDatum,
-) -> Bool {
-  and {
-    is_running_campaign(tx.inputs, self_script)?,
 
-    must_mint_support_token(tx, self_script)?,
-
-    must_send_support_token(tx, self_script, with_backer_datum)?,
-  }
-} 
 
 
 
@@ -437,59 +417,22 @@ fn finish_campaign(
   backer_datum: BackerDatum,
   platform: VerificationKeyHash,
 ) -> Bool {
-  expect CampaignDatum { goal, deadline, creator: (pkh, _), state: Running, .. } =
-    campaign_datum
-
-  let backer_datum_data: Data = backer_datum
+  // platform can only cancel after deadline, creator can cancel at anytime
   let is_signed_by_platform = tx |> must_be_signed_by(platform)
-
-  let self_address = Address(Script(self_script), None)
-  let sum_support =
-    fn(sum, Input { output: Output { address, datum, value, .. }, .. }) {
-      if address == self_address {
-        when datum is {
-          InlineDatum(input_datum) ->
-            if input_datum is BackerDatum {
-              assets.lovelace_of(value) + sum
-            } else {
-              sum
-            }
-          _ -> sum
-        }
-      } else {
-        sum
-      }
-    }
-  let supports = tx.inputs |> list.reduce(0, sum_support)
-  expect supports >= goal
-  
   and {
     if is_signed_by_platform? {
-        must_be_after_deadline(tx, campaign_datum.deadline)?
-      } else {
-        must_be_signed_by(tx, campaign_datum.creator.1st)?
-      },
-
-      is_running_campaign(tx.inputs, self_script)?,
-      must_send_state_token(
-        tx,
-        self_script,
-        with_datum: CampaignDatum { ..campaign_datum, state: Finished },
-      )?,
-
-      must_reach_goal(
+      must_be_after_deadline(tx, campaign_datum.deadline)?
+    } else {
+      must_be_signed_by(tx, campaign_datum.creator.1st)?
+    },
+    is_running_campaign(tx.inputs, self_script)?,
+    must_reach_goal(
         tx,
         self_script,
         campaign_datum.goal,
         campaign_datum.creator,
       )?,
-      must_mint_reward_burn_support(tx, self_script, backer_datum)?,
-      must_distribute_to_creator(tx, self_script, campaign_datum.creator)?,
-      
-    } else if current_datum is BackerDatum {
-    is_running_campaign(tx.inputs, self_script)?
-  } else {
-    fail @"Invalid Finish Datum Type!"
+    must_mint_reward_burn_support(tx, self_script, backer_datum)?,
   }
 }
 
@@ -589,7 +532,6 @@ fn must_distribute_to_creator(
     }
   let output_lovelace = list.reduce(tx.outputs, 0, sum_output)
 
-  // 4. Check that the creator receives at least as much as came from the script
   (output_lovelace >= input_lovelace)?
 }
 
@@ -602,30 +544,23 @@ fn validate_finish_campaign(
   platform: VerificationKeyHash,
 ) -> Bool {
   if current_datum is campaign_datum: CampaignDatum {
-    // The platform can only finish after the deadline;
-    // the creator can finish earlier if the goal is reached
     let is_signed_by_platform = tx |> must_be_signed_by(platform)
 
     and {
-      // If platform is signing, ensure we passed the deadline
       if is_signed_by_platform? {
         must_be_after_deadline(tx, campaign_datum.deadline)?
       } else {
-        // Otherwise, ensure the transaction is signed by the creator
         must_be_signed_by(tx, campaign_datum.creator.1st)?
       },
 
-      // The campaign state token UTxO must still be in the Running state
       is_running_campaign(tx.inputs, self_script)?,
 
-      // Move STATE_TOKEN to the same script address with `state = Finished`
       must_send_state_token(
         tx,
         self_script,
         with_datum: CampaignDatum { ..campaign_datum, state: Finished },
       )?,
 
-      // Must confirm total backer supports >= goal
       must_reach_goal(
         tx,
         self_script,
@@ -634,7 +569,6 @@ fn validate_finish_campaign(
       )?,
     }
   } else if current_datum is BackerDatum {
-    // If the inline datum is BackerDatum, we only check the campaign is still running
     is_running_campaign(tx.inputs, self_script)?
   } else {
     fail @"Invalid Finish Datum Type!"
