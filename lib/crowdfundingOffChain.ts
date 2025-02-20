@@ -23,7 +23,7 @@ import {
   
   import { network } from "@/config/lucid";
   import { script } from "@/config/script";
-  import { STATE_TOKEN, SUPPORT_TOKEN } from "@/config/crowdfunding";
+  import { STATE_TOKEN, SUPPORT_TOKEN, REWARD_TOKEN } from "@/config/crowdfunding";
   import {
     BackerDatum,
     CampaignActionRedeemer,
@@ -70,6 +70,8 @@ import {
     const { platform, creator, hash, index } =
       campaign[campaignPolicyId].STATE_TOKEN;
     const StateTokenUnit = toUnit(campaignPolicyId, STATE_TOKEN.hex); // `${PolicyID}${AssetName}`
+    const SupportTokenUnit = toUnit(campaignPolicyId, SUPPORT_TOKEN.hex); // `${PolicyID}${AssetName}`
+    const RewardTokenUnit = toUnit(campaignPolicyId, REWARD_TOKEN.hex); // `${PolicyID}${AssetName}`
   
     const nonceTxHash = String(hash);
     const nonceTxIdx = BigInt(index);
@@ -92,6 +94,21 @@ import {
     );
   
     if (!StateTokenUTxO.datum) throw "No Datum";
+
+    const [SupportTokenUTxO] = await lucid.utxosAtWithUnit(
+        campaignAddress,
+        SupportTokenUnit,
+      );
+    
+      if (!StateTokenUTxO.datum) throw "No Datum";
+
+
+      const [RewardTokenUTxO] = await lucid.utxosAtWithUnit(
+        campaignAddress,
+        RewardTokenUnit,
+      );
+    
+      if (!StateTokenUTxO.datum) throw "No Datum";
   
     const campaignDatum = Data.from(StateTokenUTxO.datum, CampaignDatum);
   
@@ -152,7 +169,7 @@ import {
     const supportADA = parseFloat(
       `${supportLovelace / 1_000000n}.${supportLovelace % 1_000000n}`,
     );
-  
+    
     return {
       CampaignInfo: {
         id: campaignPolicyId,
@@ -177,6 +194,14 @@ import {
       StateToken: {
         unit: StateTokenUnit,
         utxo: StateTokenUTxO,
+      },
+      SupportToken: {
+        unit: SupportTokenUnit,
+        utxo: SupportTokenUTxO,
+      },
+      RewardToken: {
+        unit: RewardTokenUnit,
+        utxo: RewardTokenUTxO,
       },
     };
   }
@@ -314,18 +339,22 @@ import {
     if (!wallet) throw "Disconnected Wallet";
     if (!address) throw "No Address";
     if (!campaign) throw "No Campaign";
+
+
   
-    const { CampaignInfo, SupportToken } = campaign;
-    const [SupportToken] = await lucid.utxosAtWithUnit(
-        CampaignInfo.address,
-        SupportToken.unit,
-      );
+    const { CampaignInfo } = campaign;
+    
     const validator: Validator = CampaignInfo.validator;
     const campaignAddress = CampaignInfo.address;
     const campaignPolicy = mintingPolicyToId(validator);
     const backers = CampaignInfo.data.backers;
 
     const SupportTokenUnit = toUnit(campaignPolicy, SUPPORT_TOKEN.hex);
+
+    const [SupportToken] = await lucid.utxosAtWithUnit(
+        CampaignInfo.address,
+        SupportTokenUnit,
+      );
 
 
   
@@ -355,9 +384,8 @@ import {
   
     let newTx = lucid
       .newTx()
-      .readFrom([StateToken.utxo])
       .collectFrom(
-              [SupportTokenUTxO, ...CampaignInfo.data.backers.map(({ utxo }) => utxo)],
+              [CampaignInfo.data.backers.map(({ utxo }) => utxo)],
               finishMintBurnRedeemer,
             ) 
       .collectFrom(backersupportTokenUtxos, finishMintBurnRedeemer)
@@ -387,23 +415,26 @@ import {
     handleSuccess(`Finish & Mint Rewards TxHash: ${txHash}`);
   
     return {
-      ...campaign,
       CampaignInfo: {
         ...CampaignInfo,
+        datum: {
+          ...CampaignInfo.datum,
+        },
         data: {
           ...CampaignInfo.data,
-          backers: platform
-            ? []
-            : CampaignInfo.data.backers.filter(
-                (backer) => backer.address !== address,
-              ),
-          support: {
-            ada: platform ? 0 : CampaignInfo.data.support.ada - backerADA,
-            lovelace: platform
-              ? 0n
-              : CampaignInfo.data.support.lovelace - backerLovelace,
-          },
         },
+      },
+      StateToken: campaign.StateToken,
+  
+      BurnedSupportToken: {
+        unit: SupportTokenUnit,
+        quantity: totalSupportTokensToBurn, // burned
+      },
+  
+      RewardToken: {
+        unit: RewardTokenUnit,
+        quantity: BigInt(backers.length),
+        distributedTo: backers.map(({ address: bAddr }) => bAddr),
       },
     };
   }
@@ -570,18 +601,18 @@ import {
           backers: [
             ...CampaignInfo.data.backers,
             {
-              address, // The backer's base address
+              address,
               pkh: backerPKH,
-              skh: backerSKH,
+              skh: backerPKH,
               pk: keyHashToCredential(backerPKH),
               sk: keyHashToCredential(backerSKH),
               support: { ada, lovelace },
               utxo: {
                 txHash,
-                outputIndex: 0, // The minted UTXO index might be 0 if it's the first output
-                address: campaignAddress,
+                outputIndex: 0,
+                address: CampaignInfo.address,
                 assets: { lovelace },
-                datum: backerDatum,
+                backerDatum,
               },
             },
           ],
@@ -589,6 +620,16 @@ import {
             ada: CampaignInfo.data.support.ada + ada,
             lovelace: CampaignInfo.data.support.lovelace + lovelace,
           },
+        },
+      },
+      SupportToken: {
+        unit: SupportTokenUnit,
+        utxo: {
+          txHash,
+          outputIndex: 1,
+          address: campaignAddress,
+          assets: SupportToken,
+          datum: supportRedeemer,
         },
       },
     };
@@ -662,8 +703,6 @@ import {
         data: {
           ...CampaignInfo.data,
           state: newState,
-          backers: [],
-          support: { ada: 0, lovelace: 0n },
         },
       },
       StateToken: {
@@ -800,15 +839,19 @@ import {
     handleSuccess(`Collect Support TxHash: ${txHash}`);
     return {
       ...campaign,
+      CollectedSupport: {
+        txHash,
+        to: CampaignInfo.data.creator.address,
+        ada: backerADA,
+        lovelace: backerLovelace,
+      },
       CampaignInfo: {
         ...CampaignInfo,
         data: {
           ...CampaignInfo.data,
           backers: platform
             ? []
-            : CampaignInfo.data.backers.filter(
-                (b) => b.address !== address
-              ),
+            : CampaignInfo.data.backers.filter((b) => b.address !== address),
           support: {
             ada: platform
               ? 0
