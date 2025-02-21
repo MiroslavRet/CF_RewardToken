@@ -1194,3 +1194,132 @@ import {
         throw "Invalid Action";
     }
   }
+
+
+//////////////////////////////////////////////////////////// collect Support And Reward  ////////////////////////////////////////////////////////////
+
+export async function collectSupportAndReward(
+  { lucid, wallet, address }: WalletConnection,
+  campaign?: CampaignUTxO,
+  platform?: Platform
+): Promise<CampaignUTxO> {
+  if (!lucid) throw new Error("Uninitialized Lucid");
+  if (!wallet) throw new Error("Disconnected Wallet");
+  if (!address) throw new Error("No Address");
+  if (!campaign) throw new Error("No Campaign");
+
+  const { CampaignInfo, StateToken } = campaign;
+  const validator: Validator = CampaignInfo.validator;
+  const campaignAddress = CampaignInfo.address;
+  const campaignPolicy = mintingPolicyToId(validator);
+  const backers = CampaignInfo.data.backers;
+
+  if (!CampaignInfo.data.support.ada) throw new Error("Nothing to Collect");
+
+  // Determine backers and ADA to collect
+  const currentBackers = platform
+    ? CampaignInfo.data.backers
+    : CampaignInfo.data.backers.filter((backer) => backer.address === address);
+  
+  const backerADA = platform
+    ? CampaignInfo.data.support.ada
+    : currentBackers.reduce((sum, { support }) => sum + support.ada, 0);
+
+  if (!backerADA) {
+    throw new Error("You did not support this campaign or there's nothing to collect. Incorrect? Contact us!");
+  }
+
+  const backerLovelace = platform
+    ? CampaignInfo.data.support.lovelace
+    : adaToLovelace(`${backerADA}`);
+
+  // Fetch and calculate support tokens to burn
+  const supportTokenUnit = toUnit(campaignPolicy, SUPPORT_TOKEN.hex);
+  let totalSupportTokensToBurn = 0n;
+  const backerSupportTokenUtxos = backers
+    .map(({ utxo }) => {
+      const amount = utxo.assets[supportTokenUnit] ?? 0n;
+      totalSupportTokensToBurn += amount;
+      return utxo;
+    })
+    .filter(({ assets }) => assets[supportTokenUnit] > 0n);
+
+  // Prepare assets for minting/burning
+  const supportTokenToBurn = { [supportTokenUnit]: -totalSupportTokensToBurn };
+  const rewardTokenUnit = toUnit(campaignPolicy, REWARD_TOKEN.hex);
+  const rewardTokenToMint = { [rewardTokenUnit]: BigInt(backers.length) };
+
+  // Redeemers
+  const collectRedeemer = CampaignActionRedeemer.Collect; // For collecting support
+  const finishMintBurnRedeemer = Data.to(new Constr(2, [])); // For minting/burning, adjust index as needed
+
+  // Ensure wallet is selected
+  if (!lucid.wallet()) {
+    const api = await wallet.enable();
+    lucid.selectWallet.fromAPI(api);
+  }
+
+  // Build the transaction
+  let newTx = lucid
+    .newTx()
+    .readFrom([StateToken.utxo]) // Reference state token UTxO
+    .collectFrom(currentBackers.map(({ utxo }) => utxo), collectRedeemer) // Collect backer support UTxOs
+    .collectFrom(backerSupportTokenUtxos, finishMintBurnRedeemer) // Collect support token UTxOs for burning
+    .attachSpendingValidator(validator)
+    .payToAddress(CampaignInfo.data.creator.address, { lovelace: backerLovelace }) // Send collected ADA to creator
+    .mintAssets(supportTokenToBurn, finishMintBurnRedeemer) // Burn support tokens
+    .mintAssets(rewardTokenToMint, finishMintBurnRedeemer) // Mint reward tokens
+    .attachMintingPolicy(validator)
+    .attachMetadata(721, {
+      [campaignPolicy]: {
+        [REWARD_TOKEN.assetName]: {
+          platform: CampaignInfo.platform?.pkh ?? "",
+          creator: CampaignInfo.data.creator.pk ?? "",
+          hash: CampaignInfo.nonce.txHash,
+          index: Number(CampaignInfo.nonce.outputIndex),
+        },
+      },
+    });
+
+  // Distribute reward tokens to backers
+  for (const { address: backerAddress } of backers) {
+    newTx = newTx.payToAddress(backerAddress, { [rewardTokenUnit]: 1n });
+  }
+
+  // Complete and submit transaction
+  const tx = await newTx.complete({ localUPLCEval: false });
+  const txHash = await submitTx(tx);
+
+  handleSuccess(`Collect Support & Mint Rewards TxHash: ${txHash}`);
+
+  // Return updated campaign state
+  return {
+    CampaignInfo: {
+      ...CampaignInfo,
+      data: {
+        ...CampaignInfo.data,
+        backers: platform ? [] : CampaignInfo.data.backers.filter((b) => b.address !== address),
+        support: {
+          ada: platform ? 0 : CampaignInfo.data.support.ada - backerADA,
+          lovelace: platform ? 0n : CampaignInfo.data.support.lovelace - backerLovelace,
+        },
+      },
+    },
+    StateToken,
+    CollectedSupport: {
+      txHash,
+      to: CampaignInfo.data.creator.address,
+      ada: backerADA,
+      lovelace: backerLovelace,
+    },
+    BurnedSupportToken: {
+      unit: supportTokenUnit,
+      quantity: totalSupportTokensToBurn,
+    },
+    RewardToken: {
+      unit: rewardTokenUnit,
+      quantity: BigInt(backers.length),
+      distributedTo: backers.map(({ address: bAddr }) => bAddr),
+    },
+  };
+}
