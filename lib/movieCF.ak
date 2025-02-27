@@ -12,6 +12,22 @@ use crowdfunding/types.{
   MovieBackerDatum,
   MovieCampaignAction, 
   MovieMintRedeemer,
+  LaunchMovieCampaign,
+  Contribute,
+  FinishPhase,
+  CancelCampaign,
+  AdvancePhase,
+  RefundBacker,
+  ConcludeCampaign,
+  DistributeRewards,
+  PreProduction,
+  Production,
+  PostProduction,
+  Distribution,
+  Completed,
+  Cancelled,
+
+  
 }
 use crowdfunding/utils.{address_from_tuple}
 use test_kit/time/unwrap
@@ -24,23 +40,20 @@ pub fn validate_mint_movie_campaign(
   redeemer: Option<Data>,
   self_script: PolicyId,
   tx: Transaction,
-  platform: VerificationKeyHash, // included if needed
+  platform: VerificationKeyHash,
 ) -> Bool {
   when redeemer is {
-    Some(current_redeemer) -> {
+    Some(current_redeemer) ->
       if current_redeemer is LaunchMovieCampaign(campaign_datum): MovieMintRedeemer {
-        // e.g. Launch the entire multi-phase campaign
         tx |> validate_launch_movie_campaign(self_script, campaign_datum, nonce, campaign_creator)
       } else if current_redeemer is Contribute(backer_datum): MovieMintRedeemer {
-        // e.g. Mint a support token for the contributor
         tx |> validate_contribution(self_script, backer_datum)
       } else if current_redeemer is FinishPhase(backer_datum): MovieMintRedeemer {
-        // e.g. Mint a reward token for a completed phase, burn the support token, etc.
         tx |> validate_finish_phase(self_script, backer_datum)
       } else {
         False
       }
-    }
+
     None -> False
   }
 }
@@ -54,9 +67,11 @@ pub fn validate_spend_movie_campaign(
   o_ref: OutputReference,
   tx: Transaction,
 ) -> Bool {
+
+  expect Some(Input { output: Output { address, .. }, .. }) =
+    tx.inputs |> transaction.find_input(o_ref)
+  expect Script(self_script) = address.payment_credential
   // This snippet finds the input being spent that references the script output
-  expect Some(input) = tx.inputs |> find_input(o_ref)
-  expect Script(self_script) = input.output.address.payment_credential
 
   when (datum, action) is {
     // Example: Cancel the entire campaign
@@ -87,7 +102,7 @@ pub fn validate_spend_movie_campaign(
     }
 
     // Collect partial or final funds to the creator
-    (Some(current_datum), CollectFunds) -> {
+    (Some(current_datum), DistributeRewards) -> {
       if current_datum is campaign_datum: MovieCampaignDatum {
         tx |> validate_collect_phase_funds(self_script, campaign_datum)
       } else {
@@ -105,7 +120,6 @@ pub fn validate_spend_movie_campaign(
     }
 
     // Otherwise, if no known action, or no datum
-    _ ->  // NoDatum etc:
     _ -> {
       expect !is_running_campaign(tx.reference_inputs, self_script)
       tx |> must_be_signed_by(platform)
@@ -121,17 +135,17 @@ fn validate_launch_movie_campaign(
   creator: VerificationKeyHash,
 ) -> Bool {
 
-  expect MovieCampaignDatum { phases, current_phase_index, creator: (pkh, _), total_budget, state: PreProduction, .. } =
+  expect MovieCampaignDatum { phases, current_phase_index, creator: (pkh, _), .. } =
     campaign_datum
   expect creator == pkh
-  expect total_budget > 0
   // Example checks:
-  expect current_phase_index == 0
-  expect phases != []
+  expect 0 == campaign_datum.current_phase_index
+  expect campaign_datum.phases != []
 
   // Ensure the transaction start time is before the first phase deadline
-  let first_phase_deadline = campaign_datum.phases[0].phase_deadline
-  expect unwrap.finite_start_of(tx.validity_range) < first_phase_deadline
+  expect Some(first_phase) = list.at(campaign_datum.phases, 0)
+let first_phase_deadline = first_phase.phase_deadline
+expect unwrap.finite_start_of(tx.validity_range) < first_phase_deadline
 
   and {
     must_consume_creator_nonce(tx, creator, nonce)?,
@@ -152,19 +166,19 @@ fn validate_cancel_movie_campaign(
   // while creator can cancel at any time
   and {
     if is_signed_by_platform? {
-      must_be_after_deadline(tx, campaign_datum.phases.last.phase_deadline)?
+      // Extract the last phase safely from the list
+      expect Some(last_phase) = list.last(campaign_datum.phases)
+      must_be_after_deadline(tx, last_phase.phase_deadline)?
     } else {
-      must_be_signed_by(tx, campaign_datum.creator.0)?
+      must_be_signed_by(tx, campaign_datum.creator.1st)?
     },
 
     is_running_campaign(tx.inputs, self_script)?,
 
-    // Possibly check that the campaign is still “Running” (or not fully Completed)
-    // Then produce an updated datum with state=Cancelled
     must_output_state_token_for_movie_campaign(
       tx,
       self_script,
-      with_datum: MovieCampaignDatum { ..campaign_datum, state: Cancelled },
+      MovieCampaignDatum { ..campaign_datum, state: Cancelled },
     )?,
   }
 }
@@ -192,16 +206,19 @@ fn is_running_campaign(tx_inputs: List<Input>, self_script: PolicyId) -> Bool {
   }
 
   // must be campaign inline datum
-  expect InlineDatum(campaign_datum) = datum
-  expect CampaignDatum { state, .. } = campaign_datum
+   expect InlineDatum(campaign_datum) = datum
+  expect MovieCampaignDatum { state, .. } = campaign_datum
 
-  state == Running
+  // Check if the state is one of the active production states
+  state == PreProduction || state == Production || state == PostProduction || state == Distribution
 }
 
 fn must_be_signed_by(tx: Transaction, signer: VerificationKeyHash) -> Bool {
   // just expect 1 signer
   ([signer] == tx.extra_signatories)?
 }
+
+
 
 fn must_be_after_deadline(tx: Transaction, deadline: Int) -> Bool {
   // tx validFrom is after or at deadline
@@ -214,30 +231,36 @@ fn validate_advance_phase(
   campaign_datum: MovieCampaignDatum,
   platform: VerificationKeyHash,
 ) -> Bool {
-
-  
-  // Check signature from either platform or creator
-  must_be_signed_by(tx, platform)? // or campaign_datum.creator.0, or both
-
-  // Ensure we have met the goal for the current phase
+  let is_signed_by_platform = must_be_signed_by(tx, platform)
   let current_index = campaign_datum.current_phase_index
-  expect let current_phase = campaign_datum.phases[current_index]
-  must_reach_phase_goal(tx, self_script, current_phase.phase_goal)?
-
-  // Possibly check time constraints
-  must_be_before_or_at_deadline(tx, current_phase.phase_deadline)?
-
-  // Bump the phase index
+  let maybe_phase = list.at(campaign_datum.phases, current_index)
   let next_index = current_index + 1
-  // If next_index >= number_of_phases, we might be done or in distribution state
+  expect Some(current_phase) = maybe_phase
+
   let updated_datum = if next_index < list.length(campaign_datum.phases) {
     MovieCampaignDatum { ..campaign_datum, current_phase_index: next_index }
   } else {
-    // Optionally set the campaign state to Completed if we’ve run out of phases
+    // No more phases => set campaign to Completed
     MovieCampaignDatum { ..campaign_datum, state: Completed }
   }
 
-  must_output_state_token_for_movie_campaign(tx, self_script, updated_datum)?
+  and {
+    // 1) If platform signed, check deadline; else check campaign creator signature.
+    if is_signed_by_platform? {
+      must_be_before_or_at_deadline(tx, current_phase.phase_deadline)?
+    } else {
+      must_be_signed_by(tx, campaign_datum.creator.1st)?
+    },
+
+    // 2) Must have reached phase goal
+    must_reach_phase_goal(tx, self_script, current_phase.phase_goal)?,
+
+    // 3) Must be a running campaign
+    is_running_campaign(tx.inputs, self_script)?,
+
+    // 4) Output the updated campaign state token
+    must_output_state_token_for_movie_campaign(tx, self_script, updated_datum)?,
+  }
 }
 
 
@@ -249,8 +272,8 @@ fn validate_collect_phase_funds(
 ) -> Bool {
   // Confirm the campaign is indeed in a “Running” or “Production” state
   // and the current phase is funded.
-  let current_phase = campaign_datum.phases[campaign_datum.current_phase_index]
-  must_reach_phase_goal(tx, self_script, current_phase.phase_goal)?
+
+  must_reach_phase_goal(tx, self_script, campaign_datum.phase_goal)?
 
   // The transaction should pay out the locked script funds for this phase to the creator
   must_distribute_phase_funds(tx, self_script, campaign_datum.creator)
@@ -263,22 +286,30 @@ fn validate_conclude_campaign(
   campaign_datum: MovieCampaignDatum,
   platform: VerificationKeyHash,
 ) -> Bool {
-  // Check signature from platform or from the campaign creator
-  let is_signed_by_platform = must_be_signed_by(tx, platform)
-  if !is_signed_by_platform? {
-    must_be_signed_by(tx, campaign_datum.creator.0)?
+  and {
+    // 1) Check if the platform signed. If not, the creator must sign.
+    if !must_be_signed_by(tx, platform)? {
+      // If platform did NOT sign, then the creator must sign.
+      must_be_signed_by(tx, campaign_datum.creator.1st)?
+    } else {
+      // If platform DID sign, we return True to continue
+      True
+    },
+
+    // 2) Extract the last phase safely from the list
+    let maybe_last_phase = list.last(campaign_datum.phases),
+    expect Some(last_phase) = maybe_last_phase,
+
+    // 3) Check we are after the last phase’s deadline
+    must_be_after_deadline(tx, last_phase.phase_deadline)?,
+
+    // 4) Finally, output an updated datum with state=Completed
+    must_output_state_token_for_movie_campaign(
+      tx,
+      self_script,
+      MovieCampaignDatum { ..campaign_datum, state: Completed },
+    )?,
   }
-
-  // Possibly ensure we are at or beyond the last phase
-  let last_phase = campaign_datum.phases.last
-  must_be_after_deadline(tx, last_phase.phase_deadline)?
-
-  // Produce an updated datum with state=Completed (or similar)
-  must_output_state_token_for_movie_campaign(
-    tx,
-    self_script,
-    MovieCampaignDatum { ..campaign_datum, state: Completed },
-  )
 }
 
 fn must_reach_goal(
@@ -330,47 +361,7 @@ fn must_reach_phase_goal(
   (total >= phase_goal)?
 }
 
-fn must_refund(
-  tx: Transaction,
-  self_script: PolicyId,
-  backer_datum: BackerDatum,
-) {
-  let backer_datum_data: Data = backer_datum
 
-  // collect input backer support lovelaces from self address
-  let self_address = Address(Script(self_script), None)
-  let sum_input =
-    fn(sum, Input { output: Output { address, datum, value, .. }, .. }) {
-      if address == self_address {
-        when datum is {
-          InlineDatum(input_datum) ->
-            if input_datum == backer_datum_data {
-              assets.lovelace_of(value) + sum
-            } else {
-              sum
-            }
-          _ -> sum
-        }
-      } else {
-        sum
-      }
-    }
-  let input_lovelace = list.reduce(tx.inputs, 0, sum_input)
-
-  // collect output lovelaces to backer address
-  let backer_address = utils.address_from_tuple(backer_datum)
-  let sum_output =
-    fn(sum, Output { address, value, .. }) {
-      if address == backer_address {
-        assets.lovelace_of(value) + sum
-      } else {
-        sum
-      }
-    }
-  let output_lovelace = list.reduce(tx.outputs, 0, sum_output)
-
-  (output_lovelace >= input_lovelace)?
-}
 
 fn must_output_state_token_for_movie_campaign(
   tx: Transaction,
@@ -378,7 +369,7 @@ fn must_output_state_token_for_movie_campaign(
   campaign_datum: MovieCampaignDatum,
 ) -> Bool {
   let datum_data: Data = campaign_datum
-  let movie_script_address = utils.address_from_script(self_script)
+  let movie_script_address = Address(Script(self_script), None)
 
   let Output { address, datum, value, .. } <- list.any(tx.outputs)
 
@@ -464,105 +455,33 @@ fn validate_finish_phase(
   must_mint_reward_burn_support(tx, self_script, backer_datum)?
 }
 
-fn must_mint_reward_burn_support(
-  tx: Transaction,
-  self_script: PolicyId,
-  backer_datum: BackerDatum,
-) -> Bool {
-  let backer_datum_data: Data = backer_datum
 
-  let self_address = Address(Script(self_script), None)
-  
-  let input_support_token =
-    list.reduce(
-      tx.inputs,
-      0,
-      fn(sum, Input { output: Output { address, datum, value, .. }, .. }) {
-        if address == self_address {
-          when datum is {
-            InlineDatum(input_datum) ->
-              if input_datum == backer_datum_data {
-                sum + assets.quantity_of(
-                  value,
-                  self_script,
-                  config.support_token,
-                )
-              } else {
-                sum
-              }
-            _ -> sum
-          }
-        } else {
-          sum
-        }
-      },
-    )
-
-  let minted_and_burned_tokens =
-    tx.mint |> assets.tokens(self_script) |> dict.to_pairs()
-
-  let mint_and_burn_valid =
-    minted_and_burned_tokens == [
-      Pair(config.reward_token, input_support_token),
-      // Mint Reward Tokens
-      Pair(config.support_token, -input_support_token),
-    ]
-
-  // Burn Support Tokens
-  let backer_address = utils.address_from_tuple(backer_datum)
-  let sum_output =
-    fn(sum, Output { address, value, .. }) {
-      if address == backer_address {
-        assets.quantity_of(value, self_script, config.reward_token) + sum
-      } else {
-        sum
-      }
-    }
-  let output_reward_token = list.reduce(tx.outputs, 0, sum_output)
-
-  let reward_sent_valid = output_reward_token >= input_support_token
-
-  (mint_and_burn_valid && reward_sent_valid)?
-}
-
-fn validate_distribute_to_creator(
-  tx: Transaction,
-  self_script: PolicyId,
-  campaign_datum: CampaignDatum,
-) -> Bool {
-  expect !is_running_campaign(tx.reference_inputs, self_script)
-  must_distribute_to_creator(tx, self_script, campaign_datum.creator)?
-}
-
-fn must_distribute_to_creator(
+fn must_distribute_phase_funds(
   tx: Transaction,
   self_script: PolicyId,
   (creator_pkh, creator_skh),
 ) -> Bool {
-  // 1. Compute how much Lovelace is coming from the script address
-  let self_address = Address(Script(self_script), None)
-  let sum_input =
-    fn(sum, Input { output: Output { address, value, .. }, .. }) {
-      if address == self_address {
-        assets.lovelace_of(value) + sum
-      } else {
-        sum
-      }
+  let script_address = Address(Script(self_script), None)
+
+  // Sum how much Lovelace is coming from the script
+  let sum_input = fn(sum, Input { output, .. }) {
+    if output.address == script_address {
+      assets.lovelace_of(output.value) + sum
+    } else {
+      sum
     }
+  }
   let input_lovelace = list.reduce(tx.inputs, 0, sum_input)
 
-  // 2. Determine the creator’s Address
+  // Sum how much Lovelace goes to the creator
   let creator_address = utils.address_from_tuple((creator_pkh, creator_skh))
-
-  // 3. Sum how much Lovelace is going to the creator in the outputs
-  let sum_output =
-    fn(sum, Output { address, value, .. }) {
-      if address == creator_address {
-        assets.lovelace_of(value) + sum
-      } else {
-        sum
-      }
+  let sum_output = fn(sum, Output { address, value, .. }) {
+    if address == creator_address {
+      assets.lovelace_of(value) + sum
+    } else {
+      sum
     }
+  }
   let output_lovelace = list.reduce(tx.outputs, 0, sum_output)
 
   (output_lovelace >= input_lovelace)?
@@ -663,4 +582,10 @@ fn must_mint_reward_burn_support(
   let reward_ok = reward_tokens_out >= input_support_tokens
 
   (mint_burn_ok && reward_ok)?
+}
+
+
+
+fn must_be_before_or_at_deadline(tx: Transaction, deadline: Int) -> Bool {
+  (unwrap.finite_start_of(tx.validity_range) <= deadline)?
 }
