@@ -263,19 +263,22 @@ fn validate_advance_phase(
 }
 
 
-// Example: Collect funds from the script for the current phase
 fn validate_collect_phase_funds(
   tx: Transaction,
   self_script: PolicyId,
-  campaign_datum: MovieCampaignDatum,
+  campaign_datum: MovieCampaignDatum
 ) -> Bool {
-  // Confirm the campaign is indeed in a “Running” or “Production” state
-  // and the current phase is funded.
+  // Ensure the campaign is active (e.g., not ended or canceled)
+  expect is_running_campaign(tx.reference_inputs, self_script)
 
-  must_reach_phase_goal(tx, self_script, campaign_datum.phase_goal)?
+  // Get the current phase's goal
+  let current_phase = list.at(campaign_datum.phases, campaign_datum.current_phase_index)
+  expect Some(phase) = current_phase
+  let phase_goal = phase.phase_goal
 
-  // The transaction should pay out the locked script funds for this phase to the creator
-  must_distribute_phase_funds(tx, self_script, campaign_datum.creator)
+  // Verify the phase goal is met and distribute funds
+  must_reach_phase_goal(tx, self_script, phase_goal) &&
+  must_distribute_phase_funds(tx, self_script, campaign_datum.creator, campaign_datum.current_phase_index)
 }
 
 // Example: Conclude entire campaign after the final phase
@@ -346,9 +349,7 @@ fn must_reach_phase_goal(
   self_script: PolicyId,
   phase_goal: Lovelace
 ) -> Bool {
-  let script_address = Address(Script(self_script), None)
-
-  // Find the state token UTxO in reference inputs to get the current phase index
+  // Find the state token UTxO to get the current phase index
   expect Some(state_input) = list.find(
     tx.reference_inputs,
     fn(input) {
@@ -356,29 +357,29 @@ fn must_reach_phase_goal(
       assets.quantity_of(input.output.value, self_script, config.state_token) == 1
     }
   )
-
-  // Extract MovieCampaignDatum from the state token UTxO to get current_phase_index
   expect InlineDatum(campaign_datum) = state_input.output.datum
   expect MovieCampaignDatum { current_phase_index, .. } = campaign_datum
 
-  // Sum Lovelace from inputs where phase_index matches current_phase_index
-  let sum_support = fn(sum, input: Input) {
-    if input.output.address == script_address {
-      when input.output.datum is {
-        InlineDatum(datum) ->
-          if datum is MovieBackerDatum && datum.phase_index == current_phase_index {
-            sum + assets.lovelace_of(input.output.value)
-          } else {
-            sum
-          }
-        _ -> sum
+  // Sum contributions for the current phase
+  let total = list.reduce(
+    tx.inputs,
+    0,
+    fn(sum, input) {
+      if input.output.address == script_address {
+        when input.output.datum is {
+          InlineDatum(datum) ->
+            if datum is MovieBackerDatum && datum.phase_index == current_phase_index {
+              sum + assets.lovelace_of(input.output.value)
+            } else {
+              sum
+            }
+          _ -> sum
+        }
+      } else {
+        sum
       }
-    } else {
-      sum
     }
-  }
-
-  let total = list.reduce(tx.inputs, 0, sum_support)
+  )
   total >= phase_goal
 }
 
@@ -480,32 +481,47 @@ fn validate_finish_phase(
 fn must_distribute_phase_funds(
   tx: Transaction,
   self_script: PolicyId,
-  (creator_pkh, creator_skh),
+  creator: (PaymentKeyHash, StakeKeyHash),
+  current_phase_index: Int
 ) -> Bool {
   let script_address = Address(Script(self_script), None)
+  let creator_address = utils.address_from_tuple(creator)
 
-  // Sum how much Lovelace is coming from the script
-  let sum_input = fn(sum, Input { output, .. }) {
-    if output.address == script_address {
-      assets.lovelace_of(output.value) + sum
-    } else {
-      sum
+  // Sum Lovelace from script inputs for the current phase
+  let input_lovelace = list.reduce(
+    tx.inputs,
+    0,
+    fn(sum, input) {
+      if input.output.address == script_address {
+        when input.output.datum is {
+          InlineDatum(datum) ->
+            if datum is MovieBackerDatum && datum.phase_index == current_phase_index {
+              sum + assets.lovelace_of(input.output.value)
+            } else {
+              sum
+            }
+          _ -> sum
+        }
+      } else {
+        sum
+      }
     }
-  }
-  let input_lovelace = list.reduce(tx.inputs, 0, sum_input)
+  )
 
-  // Sum how much Lovelace goes to the creator
-  let creator_address = utils.address_from_tuple((creator_pkh, creator_skh))
-  let sum_output = fn(sum, Output { address, value, .. }) {
-    if address == creator_address {
-      assets.lovelace_of(value) + sum
-    } else {
-      sum
+  // Sum Lovelace sent to the creator in outputs
+  let output_lovelace = list.reduce(
+    tx.outputs,
+    0,
+    fn(sum, output) {
+      if output.address == creator_address {
+        sum + assets.lovelace_of(output.value)
+      } else {
+        sum
+      }
     }
-  }
-  let output_lovelace = list.reduce(tx.outputs, 0, sum_output)
+  )
 
-  (output_lovelace >= input_lovelace)?
+  output_lovelace >= input_lovelace
 }
 
 
