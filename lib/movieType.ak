@@ -1,5 +1,5 @@
-use aiken/crypto::{VerificationKeyHash}
-use cardano/assets::{Lovelace}
+use aiken/crypto.{VerificationKeyHash}
+use cardano/assets.{Lovelace}
 use aiken/collection/list
 
 //
@@ -64,7 +64,7 @@ pub type MovieCampaignDatum {
 pub type MovieBackerDatum {
   backer_pkh: PaymentKeyHash,
   backer_skh: StakeKeyHash,
-  tier: ByteArray, // e.g. "Executive Producer", "Early Bird", etc.
+  phase_index: Int,
 }
 
 //
@@ -112,21 +112,3 @@ pub type MovieCampaignAction {
 }
 
 
-fn must_reach_phase_goal(
-  tx: Transaction,
-  self_script: PolicyId,
-  phase_goal: Lovelace
-) -> Bool {
-  let script_address = Address(Script(self_script), None)
-
-  let sum_support = fn(sum, Input { output, .. }) {
-    if output.address == script_address {
-      assets.lovelace_of(output.value) + sum
-    } else {
-      sum
-    }
-  }
-
-  let total = list.reduce(tx.inputs, 0, sum_support)
-  (total >= phase_goal)?
-}
