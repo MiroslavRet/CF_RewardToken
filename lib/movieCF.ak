@@ -135,17 +135,15 @@ fn validate_launch_movie_campaign(
   creator: VerificationKeyHash,
 ) -> Bool {
 
-  expect MovieCampaignDatum { phases, current_phase_index, creator: (pkh, _), .. } =
-    campaign_datum
+  expect MovieCampaignDatum { phases, current_phase_index, creator: (pkh, _), .. } = campaign_datum
   expect creator == pkh
-  // Example checks:
-  expect 0 == campaign_datum.current_phase_index
-  expect campaign_datum.phases != []
+  expect current_phase_index == 0
+  expect !list.is_empty(phases)
 
   // Ensure the transaction start time is before the first phase deadline
-  expect Some(first_phase) = list.at(campaign_datum.phases, 0)
-let first_phase_deadline = first_phase.phase_deadline
-expect unwrap.finite_start_of(tx.validity_range) < first_phase_deadline
+  expect Some(first_phase) = list.at(phases, 0)
+  let first_phase_deadline = first_phase.phase_deadline
+  expect unwrap.finite_start_of(tx.validity_range) < first_phase_deadline
 
   and {
     must_consume_creator_nonce(tx, creator, nonce)?,
@@ -153,6 +151,7 @@ expect unwrap.finite_start_of(tx.validity_range) < first_phase_deadline
     must_output_state_token_for_movie_campaign(tx, self_script, campaign_datum)?,
   }
 }
+
 
 fn validate_cancel_movie_campaign(
   tx: Transaction,
@@ -588,4 +587,25 @@ fn must_mint_reward_burn_support(
 
 fn must_be_before_or_at_deadline(tx: Transaction, deadline: Int) -> Bool {
   (unwrap.finite_start_of(tx.validity_range) <= deadline)?
+}
+
+
+
+// Function to get the deadline of a phase by its name
+//
+fn get_phase_deadline_by_name(campaign: MovieCampaignDatum, phase_name: ByteArray) -> Option<Int> {
+  when list.find(campaign.phases, fn(phase) { phase.phase_name == phase_name }) is {
+    Some(phase) -> Some(phase.phase_deadline)
+    None -> None
+  }
+}
+
+//
+// Function to get the current phase deadline
+//
+fn get_current_phase_deadline(campaign: MovieCampaignDatum) -> Option<Int> {
+  when list.at(campaign.phases, campaign.current_phase_index) is {
+    Some(phase) -> Some(phase.phase_deadline)
+    None -> None
+  }
 }
