@@ -348,16 +348,38 @@ fn must_reach_phase_goal(
 ) -> Bool {
   let script_address = Address(Script(self_script), None)
 
-  let sum_support = fn(sum, Input { output, .. }) {
-    if output.address == script_address {
-      assets.lovelace_of(output.value) + sum
+  // Find the state token UTxO in reference inputs to get the current phase index
+  expect Some(state_input) = list.find(
+    tx.reference_inputs,
+    fn(input) {
+      input.output.address == script_address &&
+      assets.quantity_of(input.output.value, self_script, config.state_token) == 1
+    }
+  )
+
+  // Extract MovieCampaignDatum from the state token UTxO to get current_phase_index
+  expect InlineDatum(campaign_datum) = state_input.output.datum
+  expect MovieCampaignDatum { current_phase_index, .. } = campaign_datum
+
+  // Sum Lovelace from inputs where phase_index matches current_phase_index
+  let sum_support = fn(sum, input: Input) {
+    if input.output.address == script_address {
+      when input.output.datum is {
+        InlineDatum(datum) ->
+          if datum is MovieBackerDatum && datum.phase_index == current_phase_index {
+            sum + assets.lovelace_of(input.output.value)
+          } else {
+            sum
+          }
+        _ -> sum
+      }
     } else {
       sum
     }
   }
 
   let total = list.reduce(tx.inputs, 0, sum_support)
-  (total >= phase_goal)?
+  total >= phase_goal
 }
 
 
